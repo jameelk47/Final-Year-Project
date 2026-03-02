@@ -8,7 +8,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from category_encoders import TargetEncoder
-
+from sklearn.model_selection import train_test_split
 
 # Download fiverr dataset
 path = kagglehub.dataset_download("kirilspiridonov/freelancers-offers-on-fiverr")
@@ -21,8 +21,10 @@ df = pd.read_csv(csv_file, encoding='latin-1')
 
 print(df.info())
 
+df = df.rename(columns={'ï..Category': 'Category'})
 
-# Clean votes, stars, price and add votes_capped flag
+
+# Clean votes, stars, price and add votes_capped flag, cold_start flag
 class FiverrPreProcessor(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         return self
@@ -30,16 +32,20 @@ class FiverrPreProcessor(BaseEstimator, TransformerMixin):
     def transform(self, X):
         X = X.copy()
         X['votes_capped'] = (X['votes'] == '1k+').astype(int)
-        
-        X['votes'] = X['votes'].replace('1k+', '1000').astype(float)
-        
-        X['stars'] = X['stars'].astype(float)
+
+        X['votes'] = X['votes'].replace('1k+', '1000')
+
+        X['cold_start'] = ((X['stars'] == 'nul') & (X['votes'] == 'nul')).astype(int)
+
+        X['votes'] = X['votes'].replace('nul', '0').astype(float)
+
+        X['stars'] = X['stars'].replace('nul', '0').astype(float)
         
         return X
 
 # Define the column groups
 text_col = 'name'
-cat_col = ['ï..Category	']
+cat_col = ['Category']
 target_enc_col = ['Subcat']
 num_cols = ['votes', 'stars', 'votes_capped']
 
@@ -59,10 +65,20 @@ fiverr_dss_pipeline = Pipeline([
     ('encoding', preprocessor)
 ])
 
+df['price'] = (
+    df['price']
+      .str.replace(',', '', regex=False)   # "2,222" -> "2222"
+      .str.replace('$', '', regex=False)   # remove currency symbols if present
+      .astype(float)
+)
+
 X = df.drop(columns=['price', 'Unnamed: 0'])
-
-y = np.log1p(df['price']).astype(float)
+y = np.log1p(df['price'])
     
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+# Now fit ONLY on training data
+fiverr_dss_pipeline.fit(X_train, y_train)
 
-
+X_processed_train = fiverr_dss_pipeline.transform(X_train)
+print(f"HNN Input Shape: {X_processed_train.shape[1]} features")
