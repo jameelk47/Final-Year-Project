@@ -1,40 +1,66 @@
 import numpy as np
 
 class UncertaintyGater:
-    def __init__(self, confidence_threshold=0.888, divergence_threshold=0.453):
+    def __init__(self, confidence_threshold=0.75, divergence_threshold=0.50):
         self.conf_thresh = confidence_threshold   # Threshold for HNN Sigma
-        self.div_thresh = divergence_threshold    # Threshold for Mcodel Disagreement
+        self.div_thresh = divergence_threshold    # Threshold for Model Disagreement
 
     def get_recommendation(self, lgbm_mu, hnn_mu, hnn_sigma):
         """
-        Logic to determine the 'Health' of the price recommendation.
+        Decision-support recommendation with consistent output structure.
+        Always returns: predicted price, range, status, and graduated advice.
         Inputs are in Log-Space.
         """
         # 1. Calculate Disagreement (Distance between models)
         disagreement = np.abs(lgbm_mu - hnn_mu)
-        
-        # 2. Determine the Status
-        if hnn_sigma < self.conf_thresh and disagreement < self.div_thresh:
+
+        # 2. Calculate Price Range (using LGBM as anchor, HNN sigma for bounds)
+        price = round(float(np.exp(lgbm_mu)), 2)
+        lower_bound = round(float(np.exp(lgbm_mu - 1.96 * hnn_sigma)), 2)
+        upper_bound = round(float(np.exp(lgbm_mu + 1.96 * hnn_sigma)), 2)
+
+        # 3. Determine Status and Graduated Advice
+        #    - Divergence (epistemic): do the models agree on this input?
+        #    - Sigma (aleatoric): how volatile is pricing in this market segment?
+        if disagreement > self.div_thresh:
+            # Safety valve: models fundamentally disagree on this input
+            status = "RED"
+            advice = (
+                "The models disagree significantly on this gig. "
+                "The predicted price may not be reliable. "
+                "Manual review of competitor prices is recommended before listing."
+            )
+        elif hnn_sigma < self.conf_thresh and disagreement < self.div_thresh:
             status = "GREEN"
-            msg = "High Confidence: Market data strongly supports this price."
-        elif hnn_sigma < (self.conf_thresh * 2) and disagreement < (self.div_thresh * 2):
+            advice = (
+                "Stable market — prices in this segment are consistent and "
+                "both models agree. You can use the predicted price as a "
+                "strong starting point. The price range is narrow."
+            )
+        elif hnn_sigma < (self.conf_thresh * 2):
             status = "YELLOW"
-            msg = "Moderate Confidence: Price may vary based on specific niche factors."
+            advice = (
+                "This market segment has volatile pricing — gigs like yours "
+                "vary widely in price. Both models agree on direction, "
+                "but consider starting closer to the lower bound and adjusting "
+                "as you gain reviews."
+            )
         else:
             status = "RED"
-            msg = "Low Confidence: Market volatility detected. Use this as a rough guide only."
+            advice = (
+                "High market volatility — prices in this segment vary "
+                "enormously. The wide range reflects genuine market uncertainty. "
+                "Use the lower bound as a starting point and review competitor "
+                "prices manually."
+            )
 
-        # 3. Calculate Final Dollar Range (using LGBM as the anchor)
-        # 95% Confidence Interval using HNN's uncertainty
-        lower_bound = np.exp(lgbm_mu - 1.96 * hnn_sigma)
-        upper_bound = np.exp(lgbm_mu + 1.96 * hnn_sigma)
-        
         return {
-            "price": np.exp(lgbm_mu),
+            "price": price,
             "range": (lower_bound, upper_bound),
             "status": status,
-            "message": msg,
-            "uncertainty_score": float(hnn_sigma)
+            "advice": advice,
+            "sigma": round(float(hnn_sigma), 4),
+            "divergence": round(float(disagreement), 4)
         }
 
     def get_advanced_recommendation(self, lgbm_mu, hnn_mu, hnn_sigma):

@@ -19,6 +19,20 @@ csv_file = os.path.join(path, "fiverr_clean.csv")
 df = pd.read_csv(csv_file, encoding='latin-1')
 print(df.info())
 df = df.rename(columns={'ï..Category': 'Category'})
+mapping = df.groupby('Category')['Subcat'].apply(lambda s: sorted(s.dropna().unique().tolist())).to_dict()
+for cat, subcats in sorted(mapping.items()):
+    print(f'\n{cat}:')
+    for s in subcats:
+        print(f'  - {s}')
+
+counts = df.groupby(['Category', 'Subcat']).size().reset_index(name='count')
+counts = counts.sort_values('count', ascending=False)
+print(counts.to_string(index=False))
+print(f'\nTotal subcategories: {counts.shape[0]}')
+print(f'\nTop 15:')
+print(counts.head(15).to_string(index=False))
+print(f'\nBottom 15 (rarest):')
+print(counts.tail(15).to_string(index=False))
 
 # Clean votes, stars, price and add votes_capped flag, cold_start flag
 class FiverrPreProcessor(BaseEstimator, TransformerMixin):

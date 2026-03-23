@@ -81,6 +81,35 @@ class SHAPAdvisor:
             shap.kmeans(X_background, 10)  # summarise background into 10 centroids
         )
 
+    def _filter_active_drivers(self, X_processed, shap_values_flat, top_n=10):
+        """
+        Filter SHAP drivers to only include features that are active
+        (non-zero) in the input. This prevents misleading explanations
+        from inactive one-hot or TF-IDF features — e.g. reporting
+        "Category_Lifestyle is pushing price down" when the user
+        selected a different category.
+
+        SHAP assigns values to zero-valued features because it measures
+        impact relative to a baseline. While technically valid, showing
+        the effect of an absent feature is not actionable advice.
+        """
+        input_values = X_processed[0] if X_processed.ndim == 2 else X_processed
+
+        # Rank ALL features by absolute SHAP impact
+        ranked_indices = np.argsort(np.abs(shap_values_flat))[::-1]
+
+        # Keep only features with non-zero input values
+        active_drivers = []
+        for i in ranked_indices:
+            if input_values[i] != 0:
+                active_drivers.append(
+                    (self.feature_names[i], float(shap_values_flat[i]))
+                )
+            if len(active_drivers) == top_n:
+                break
+
+        return active_drivers
+
     def explain_price(self, X_processed):
     
         shap_values = self.lgbm_explainer.shap_values(X_processed)
@@ -92,12 +121,8 @@ class SHAPAdvisor:
         else:
             shap_values_flat = shap_values
 
-        # Rank features by absolute SHAP impact
-        top_indices = np.argsort(np.abs(shap_values_flat))[::-1][:10]
-        top_drivers = [
-            (self.feature_names[i], float(shap_values_flat[i]))
-            for i in top_indices
-        ]
+        # Filter to only active (non-zero) features in the input
+        top_drivers = self._filter_active_drivers(X_processed, shap_values_flat)
 
         return {
             'shap_values': shap_values,
@@ -118,12 +143,8 @@ class SHAPAdvisor:
         else:
             shap_values_flat = shap_values
 
-        # Rank features by absolute SHAP impact
-        top_indices = np.argsort(np.abs(shap_values_flat))[::-1][:10]
-        top_drivers = [
-            (self.feature_names[i], float(shap_values_flat[i]))
-            for i in top_indices
-        ]
+        # Filter to only active (non-zero) features in the input
+        top_drivers = self._filter_active_drivers(X_processed, shap_values_flat)
 
         return {
             'shap_values': shap_values,

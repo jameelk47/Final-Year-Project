@@ -33,7 +33,7 @@ class FiverrPricePredictor:
         hnn_mu, hnn_sigma = self.hnn.predict(X_processed, return_std=True)
         
         # 3. Pass to your validated Gating Logic
-        return self.gater.get_advanced_recommendation(lgbm_mu, hnn_mu[0], hnn_sigma[0])
+        return self.gater.get_recommendation(lgbm_mu, hnn_mu[0], hnn_sigma[0])
 
 loaded_preprocessor = joblib.load('preprocessor.pkl')
 loaded_lgbm = joblib.load('lgbm_model.pkl')
