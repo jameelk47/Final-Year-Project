@@ -155,8 +155,9 @@ if predict_btn and title and sub_category:
         # Gating recommendation
         result = gater.get_recommendation(lgbm_mu, hnn_mu[0], hnn_sigma[0])
 
-        # SHAP price explanation (TreeExplainer — fast)
+        # SHAP explanations
         price_exp = shap_advisor.explain_price(X_processed)
+        uncertainty_exp = shap_advisor.explain_uncertainty(X_processed)
 
     # ════════════════════════════════════════════════════════════
     # SECTION 3 — Predicted Price
@@ -211,6 +212,26 @@ if predict_btn and title and sub_category:
             st.markdown(f"▼ **{human_name}** — pushing price **down** (−{impact:.3f})")
 
     st.divider()
+
+    # ════════════════════════════════════════════════════════════
+    # SECTION 6 — SHAP: What's Driving Uncertainty
+    # ════════════════════════════════════════════════════════════
+    uncertainty_drivers = [
+        (f, v) for f, v in uncertainty_exp["top_drivers"][:5] if v > 0
+    ]
+
+    if uncertainty_drivers:
+        st.subheader("⚠️ What's Driving Uncertainty")
+        st.caption(
+            "These features are making the price estimate less certain — "
+            "similar gigs with these traits show wider price variation."
+        )
+
+        for feature_name, shap_value in uncertainty_drivers[:3]:
+            human_name = _humanise(feature_name)
+            st.markdown(f"? **{human_name}** — increasing uncertainty (+{shap_value:.3f})")
+
+        st.divider()
 
     # ════════════════════════════════════════════════════════════
     # Technical Details (collapsible)

@@ -25,14 +25,6 @@ for cat, subcats in sorted(mapping.items()):
     for s in subcats:
         print(f'  - {s}')
 
-counts = df.groupby(['Category', 'Subcat']).size().reset_index(name='count')
-counts = counts.sort_values('count', ascending=False)
-print(counts.to_string(index=False))
-print(f'\nTotal subcategories: {counts.shape[0]}')
-print(f'\nTop 15:')
-print(counts.head(15).to_string(index=False))
-print(f'\nBottom 15 (rarest):')
-print(counts.tail(15).to_string(index=False))
 
 # Clean votes, stars, price and add votes_capped flag, cold_start flag
 class FiverrPreProcessor(BaseEstimator, TransformerMixin):
@@ -93,3 +85,21 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 
 # Now fit ONLY on training data
 fitted_pipeline = fiverr_dss_pipeline.fit(X_train, y_train)
+
+
+# ── Price variance by subcategory ──
+subcat_stats = (
+    df.groupby("Subcat")["price"]
+    .agg(["mean", "std", "count"])
+    .sort_values("std")
+)
+
+print("\n\n════════════════════════════════════════════════")
+print("  Subcategory Price Variance (sorted by std dev)")
+print("════════════════════════════════════════════════\n")
+
+print("NARROWEST price ranges (low std → model should be most confident):\n")
+print(subcat_stats.head(10).to_string())
+
+print("\n\nWIDEST price ranges (high std → model will show wider bands):\n")
+print(subcat_stats.tail(10).to_string())

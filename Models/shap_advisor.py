@@ -152,26 +152,19 @@ class SHAPAdvisor:
             'top_drivers': top_drivers
         }
 
-    def generate_explanation(self, price_exp, uncertainty_exp):
+    def generate_price_explanation(self, price_exp):
         """
-        Generates a human-readable explanation of what drove the
-        price prediction and uncertainty. Purely about feature importance —
-        no pricing advice or confidence levels (those come from UncertaintyGater).
+        Human-readable explanation of what drove the price prediction.
 
         Parameters
         ----------
-        price_exp       : dict returned by explain_price()
-        uncertainty_exp : dict returned by explain_uncertainty()
+        price_exp : dict returned by explain_price()
 
         Returns
         -------
         str : natural-language explanation text
         """
-        lines = []
-
-        # --- Section 1: What shaped the price prediction ---
-        lines.append("What shaped your price estimate:")
-        lines.append("")
+        lines = ["What shaped your price estimate:", ""]
 
         for feature, value in price_exp['top_drivers'][:5]:
             name = _humanise(feature)
@@ -180,18 +173,43 @@ class SHAPAdvisor:
             else:
                 lines.append(f"  \u25bc {random.choice(PRICE_NEGATIVE).format(feature=name)}")
 
-        # --- Section 2: What drove uncertainty ---
-        # Only show features that increased uncertainty (positive SHAP on sigma)
+        return "\n".join(lines)
+
+    def generate_uncertainty_explanation(self, uncertainty_exp):
+        """
+        Human-readable explanation of what drove prediction uncertainty.
+        Only surfaces features that *increased* uncertainty (positive SHAP on sigma).
+
+        Parameters
+        ----------
+        uncertainty_exp : dict returned by explain_uncertainty()
+
+        Returns
+        -------
+        str or None : explanation text, or None if no features increased uncertainty
+        """
         uncertainty_drivers = [
             (f, v) for f, v in uncertainty_exp['top_drivers'][:5] if v > 0
         ]
 
-        if uncertainty_drivers:
-            lines.append("")
-            lines.append("What's making this estimate less certain:")
-            lines.append("")
-            for feature, value in uncertainty_drivers[:3]:
-                name = _humanise(feature)
-                lines.append(f"  ? {random.choice(UNCERTAINTY_DRIVERS).format(feature=name)}")
+        if not uncertainty_drivers:
+            return None
+
+        lines = ["What's making this estimate less certain:", ""]
+        for feature, value in uncertainty_drivers[:3]:
+            name = _humanise(feature)
+            lines.append(f"  ? {random.choice(UNCERTAINTY_DRIVERS).format(feature=name)}")
 
         return "\n".join(lines)
+
+    def generate_explanation(self, price_exp, uncertainty_exp):
+        """
+        Convenience wrapper that combines both explanations into one block.
+        Prefer calling generate_price_explanation / generate_uncertainty_explanation
+        individually when you need to display them separately.
+        """
+        parts = [self.generate_price_explanation(price_exp)]
+        unc = self.generate_uncertainty_explanation(uncertainty_exp)
+        if unc:
+            parts.append(unc)
+        return "\n\n".join(parts)

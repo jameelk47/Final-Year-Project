@@ -1,173 +1,256 @@
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import layers, models
-import tensorflow.keras.backend as K
+import random
 from sklearn.base import BaseEstimator, RegressorMixin
-
-class FaithfulHNN(tf.keras.Model):
-    def __init__(self, input_dim):
-        super().__init__()
-        
-        # Shared trunk
-        self.trunk = models.Sequential([
-            layers.Dense(256, activation='relu'),
-            layers.BatchNormalization(),
-            layers.Dropout(0.2),
-            layers.Dense(128, activation='relu'),
-            layers.Dense(64, activation='relu'),
-        ])
-        
-        # Mean head
-        self.mean_head = layers.Dense(1)
-        
-        # Variance head (log-variance)
-        self.var_head = layers.Dense(1)
-
-    def call(self, inputs, training=False):
-        z = self.trunk(inputs, training=training)
-        
-        # Mean uses full trunk
-        mu = self.mean_head(z)
-        
-        # Variance head receives stop-gradient trunk
-        z_stop = tf.stop_gradient(z)
-        log_var = self.var_head(z_stop)
-        
-        return mu, log_var
+import tensorflow as tf
+from tensorflow.keras import layers, models, backend as K
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error
+from Dataset.preprocessing import fiverr_dss_pipeline, X_train, X_test, y_train, y_test
+import joblib
 
 
-def gaussian_nll(y_true, mu, log_var):
-    return 0.5 * tf.exp(-log_var) * tf.square(y_true - mu) + 0.5 * log_var
+# ---------------------------------------------------------------------------
+# Loss function kept at module level for serialisation / loading
+# ---------------------------------------------------------------------------
+
+@tf.keras.saving.register_keras_serializable()
+def aleatoric_loss(y_true, y_pred):
+    mu = y_pred[:, :1]
+    log_var = y_pred[:, 1:]
+    return K.mean(0.5 * K.exp(-log_var) * K.square(y_true - mu) + 0.5 * log_var)
 
 
-class FaithfulHNNTrainer:
-    def __init__(self, input_dim, learning_rate=1e-3):
-        self.model = FaithfulHNN(input_dim)
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate)
+# ---------------------------------------------------------------------------
+# Stop-gradient layer (Proposal 2)
+# ---------------------------------------------------------------------------
 
-    @tf.function
-    def train_step(self, x, y):
+@tf.keras.saving.register_keras_serializable()
+class StopGradientLayer(layers.Layer):
+    """Forward pass unchanged; backward pass blocks all gradients.
+
+    Inserted between the shared trunk and the variance head so that
+    the variance loss cannot update any trunk parameters.
+    """
+    def call(self, inputs):
+        return tf.stop_gradient(inputs)
+
+
+# ---------------------------------------------------------------------------
+# Custom model with Newton-scaled mean gradient (Proposal 1) and
+# stop-gradient trunk isolation for variance (Proposal 2)
+# ---------------------------------------------------------------------------
+
+@tf.keras.saving.register_keras_serializable()
+class HeteroscedasticModel(models.Model):
+
+    def train_step(self, data):
+        x, y_true = data
+        y_true = tf.cast(tf.reshape(y_true, (-1, 1)), tf.float32)
+
         with tf.GradientTape() as tape:
-            mu, log_var = self.model(x, training=True)
-            loss = tf.reduce_mean(gaussian_nll(y, mu, log_var))
+            y_pred = self(x, training=True)            # (batch, 2)
+            mu      = y_pred[:, :1]
+            log_var = y_pred[:, 1:]
 
-        grads = tape.gradient(loss, self.model.trainable_variables)
+            # ---- Proposal 1: Newton-scaled mean loss ----
+            # Multiply squared error by detached precision Σ⁻¹ = exp(-log_var)
+            # so ∂L_mu/∂μ = Σ⁻¹(μ − y)  — the Newton direction.
+            # stop_gradient on log_var prevents this weighting from creating
+            # a spurious gradient path through the variance head.
+            precision = tf.exp(-tf.stop_gradient(log_var))
+            loss_mu = tf.reduce_mean(0.5 * precision * tf.square(y_true - mu))
 
-        # Newton scaling for mean-head gradients
-        sigma2 = tf.exp(log_var)
+            # ---- Variance-head loss (standard NLL terms that depend on Σ) ----
+            # Detach μ so variance loss cannot push the mean head around.
+            mu_detached = tf.stop_gradient(mu)
+            loss_var = tf.reduce_mean(
+                0.5 * tf.exp(-log_var) * tf.square(y_true - mu_detached)
+                + 0.5 * log_var
+            )
 
-        new_grads = []
-        for var, g in zip(self.model.trainable_variables, grads):
-            if g is None:
-                new_grads.append(None)
-                continue
+            total_loss = loss_mu + loss_var
 
-            # Identify mean-head variables
-            if "mean_head" in var.name:
-                # Multiply gradient by sigma^2 (Newton step)
-                # Clip variance scaling to prevent overshooting (between 0.1 and 10.0)
-                sigma2_clipped = tf.clip_by_value(sigma2, 0.1, 10.0)
-                g = g * sigma2_clipped
+        gradients = tape.gradient(total_loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
-            new_grads.append(g)
+        for m in self.metrics:
+            if m.name == "loss":
+                m.update_state(total_loss)
+        return {"loss": total_loss}
 
-        self.optimizer.apply_gradients(zip(new_grads, self.model.trainable_variables))
-        return loss
+    def test_step(self, data):
+        x, y_true = data
+        y_true = tf.cast(tf.reshape(y_true, (-1, 1)), tf.float32)
 
-class FaithfulHeteroscedasticRegressor(BaseEstimator, RegressorMixin):
-    def __init__(
-        self,
-        epochs=100,
-        batch_size=32,
-        learning_rate=0.0005,  # Lower default LR due to Newton scaling
-        verbose=0,
-        validation_split=0.2,
-        patience=15,
-    ):
+        y_pred  = self(x, training=False)
+        mu      = y_pred[:, :1]
+        log_var = y_pred[:, 1:]
+
+        nll = tf.reduce_mean(
+            0.5 * tf.exp(-log_var) * tf.square(y_true - mu) + 0.5 * log_var
+        )
+
+        for m in self.metrics:
+            if m.name == "loss":
+                m.update_state(nll)
+        return {"loss": nll}
+
+
+# ---------------------------------------------------------------------------
+# Model builder
+# ---------------------------------------------------------------------------
+
+def build_hnn_model(input_dim, learning_rate=0.001, random_state=None):
+    if random_state is not None:
+        tf.random.set_seed(random_state)
+
+    # ---- Shared trunk (θ_z) ----
+    inputs = layers.Input(shape=(input_dim,))
+    z = layers.Dense(256, activation='relu', name='trunk_dense1')(inputs)
+    z = layers.BatchNormalization(name='trunk_bn1')(z)
+    z = layers.Dropout(0.2, name='trunk_drop1')(z, training=True)   # MC-Dropout
+    z = layers.Dense(128, activation='relu', name='trunk_dense2')(z)
+    z = layers.Dropout(0.1, name='trunk_drop2')(z, training=True)   # MC-Dropout
+    z = layers.Dense(64, activation='relu', name='trunk_dense3')(z)
+
+    # ---- Mean head (θ_μ) — receives live trunk gradients ----
+    mu = layers.Dense(1, name='mu_head')(z)
+
+    # ---- Variance head (θ_σ) — trunk gradients blocked (Proposal 2) ----
+    z_stopped = StopGradientLayer(name='stop_grad_trunk')(z)
+    v = layers.Dense(64, activation='relu', name='var_hidden1')(z_stopped)
+    v = layers.Dense(32, activation='relu', name='var_hidden2')(v)
+    log_var = layers.Dense(1, name='logvar_head')(v)
+
+    # ---- Concatenate → (batch, 2) : [μ, log_var] ----
+    outputs = layers.Concatenate(name='output_concat')([mu, log_var])
+
+    model = HeteroscedasticModel(inputs=inputs, outputs=outputs)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss=aleatoric_loss,
+    )
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Scikit-learn compatible wrapper
+# ---------------------------------------------------------------------------
+
+class HeteroscedasticKerasRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, epochs=100, batch_size=32, learning_rate=0.001,
+                 n_samples=50, verbose=0, random_state=42):
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.verbose = verbose
-        self.validation_split = validation_split
-        self.patience = patience
-        self.trainer = None
+        self.n_samples = n_samples
+        self.random_state = random_state
+        self.model_ = None
 
     def fit(self, X, y):
-        X = X.astype("float32")
-        y = np.asarray(y, dtype="float32").reshape(-1, 1)
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            random.seed(self.random_state)
+            tf.random.set_seed(self.random_state)
+            tf.keras.utils.set_random_seed(self.random_state)
 
-        # Split into train and validation
-        n_train = int(len(X) * (1 - self.validation_split))
-        X_train, X_val = X[:n_train], X[n_train:]
-        y_train, y_val = y[:n_train], y[n_train:]
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32).reshape(-1, 1)
 
-        self.trainer = FaithfulHNNTrainer(X.shape[1], self.learning_rate)
+        input_dim = X.shape[1]
+        self.model_ = build_hnn_model(
+            input_dim,
+            learning_rate=self.learning_rate,
+            random_state=self.random_state,
+        )
 
-        # Create datasets
-        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        train_dataset = train_dataset.shuffle(2048).batch(self.batch_size)
-
-        val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-        val_dataset = val_dataset.batch(self.batch_size)
-
-        # Early stopping tracking
-        best_val_loss = float("inf")
-        patience_counter = 0
-        best_weights = None
-
-        for epoch in range(self.epochs):
-            # Training
-            epoch_loss = 0.0
-            n_batches = 0
-            for xb, yb in train_dataset:
-                loss = self.trainer.train_step(xb, yb)
-                epoch_loss += loss.numpy()
-                n_batches += 1
-
-            avg_train_loss = epoch_loss / n_batches if n_batches > 0 else epoch_loss
-
-            # Validation
-            val_loss = 0.0
-            val_batches = 0
-            for xb, yb in val_dataset:
-                mu, log_var = self.trainer.model(xb, training=False)
-                loss = tf.reduce_mean(gaussian_nll(yb, mu, log_var))
-                val_loss += loss.numpy()
-                val_batches += 1
-
-            avg_val_loss = val_loss / val_batches if val_batches > 0 else val_loss
-
-            # Early stopping logic
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                patience_counter = 0
-                # Save best weights
-                best_weights = [w.numpy().copy() for w in self.trainer.model.trainable_variables]
-            else:
-                patience_counter += 1
-
-            if self.verbose > 0 and epoch % 10 == 0:
-                print(
-                    f"Epoch {epoch}: train_loss={avg_train_loss:.4f}, "
-                    f"val_loss={avg_val_loss:.4f}, best_val_loss={best_val_loss:.4f}"
-                )
-
-            if patience_counter >= self.patience:
-                if self.verbose > 0:
-                    print(f"Early stopping at epoch {epoch}")
-                break
-
-        # Restore best weights
-        if best_weights is not None:
-            for var, best_w in zip(self.trainer.model.trainable_variables, best_weights):
-                var.assign(best_w)
-
+        es = EarlyStopping(monitor='val_loss', patience=15,
+                           restore_best_weights=True)
+        self.model_.fit(
+            X, y,
+            validation_split=0.2,
+            epochs=self.epochs,
+            batch_size=self.batch_size,
+            verbose=self.verbose,
+            callbacks=[es],
+        )
         return self
 
     def predict(self, X, return_std=False):
-        X = X.astype("float32")
-        mu, log_var = self.trainer.model(X, training=False)
-        mu = mu.numpy().flatten()
-        std = tf.sqrt(tf.exp(log_var)).numpy().flatten()
+        X = np.asarray(X, dtype=np.float32)
 
-        return (mu, std) if return_std else mu
+        mus = []
+        log_vars = []
+
+        for _ in range(self.n_samples):
+            preds = self.model_.predict(X, verbose=0)
+            mus.append(preds[:, 0])
+            log_vars.append(preds[:, 1])
+
+        mus = np.array(mus)            # (n_samples, n_rows)
+        log_vars = np.array(log_vars)  # (n_samples, n_rows)
+
+        final_mu = np.mean(mus, axis=0)
+
+        if return_std:
+            aleatoric_var = np.mean(np.exp(log_vars), axis=0)
+            epistemic_var = np.var(mus, axis=0)
+            total_std = np.sqrt(aleatoric_var + epistemic_var)
+            return final_mu, total_std
+
+        return final_mu
+
+
+# ===================================================================
+# TRAINING PIPELINE
+# ===================================================================
+
+X_train_proc = fiverr_dss_pipeline.transform(X_train)
+X_test_proc = fiverr_dss_pipeline.transform(X_test)
+
+# The column transformer returns sparse CSR matrices; convert to dense arrays
+X_train_proc = X_train_proc.toarray()
+X_test_proc = X_test_proc.toarray()
+
+print("Transformed train shape (dense):", X_train_proc.shape)
+print("Transformed test shape (dense):", X_test_proc.shape)
+
+# Set random seeds for reproducibility (before model creation)
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+random.seed(RANDOM_STATE)
+tf.random.set_seed(RANDOM_STATE)
+tf.keras.utils.set_random_seed(RANDOM_STATE)
+
+# 2. Create and train the heteroscedastic model
+hnn = HeteroscedasticKerasRegressor(
+    epochs=100,
+    batch_size=64,
+    learning_rate=0.001,
+    verbose=1,
+    random_state=RANDOM_STATE,
+)
+
+hnn.fit(X_train_proc, y_train)
+
+# 3. Predict on the test set (with uncertainty)
+y_pred_mean, y_pred_std = hnn.predict(X_test_proc, return_std=True)
+
+# 4. Evaluation metrics: R^2, MAE, MAPE
+r2 = r2_score(y_test, y_pred_mean)
+mae = mean_absolute_error(y_test, y_pred_mean)
+mape = mean_absolute_percentage_error(y_test, y_pred_mean)
+
+print("\n=== Heteroscedastic NN Performance (Newton + StopGrad) ===")
+print(f"R^2   : {r2:.4f}")
+print(f"MAE   : {mae:.4f}")
+print(f"MAPE  : {mape:.4f}")
+
+# 5. Optional: inspect a few predictions with uncertainty
+for i in range(5):
+    print(
+        f"True: {y_test.iloc[i]:.3f}, "
+        f"Pred: {y_pred_mean[i]:.3f}, "
+        f"Std (uncertainty): {y_pred_std[i]:.3f}"
+    )
