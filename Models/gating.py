@@ -1,15 +1,23 @@
 import numpy as np
 
 class UncertaintyGater:
-    def __init__(self, confidence_threshold=0.75, divergence_threshold=0.50):
-        self.conf_thresh = confidence_threshold   # Threshold for HNN Sigma
-        self.div_thresh = divergence_threshold    # Threshold for Model Disagreement
+    def __init__(self, green_threshold=0.7538, yellow_threshold=0.9558,
+                 divergence_threshold=0.4609):
+        self.green_thresh = green_threshold      # sigma below this → GREEN  (P30)
+        self.yellow_thresh = yellow_threshold    # sigma below this (but above green) → YELLOW (P70)
+        self.div_thresh = divergence_threshold   # model disagreement threshold (P70)
 
     def get_recommendation(self, lgbm_mu, hnn_mu, hnn_sigma):
         """
         Decision-support recommendation with consistent output structure.
         Always returns: predicted price, range, status, and graduated advice.
         Inputs are in Log-Space.
+
+        Logic:
+          1. disagreement > div_thresh           → RED  (models disagree)
+          2. Models agree AND sigma < green_thresh  → GREEN
+          3. Models agree AND sigma < yellow_thresh → YELLOW
+          4. Models agree AND sigma >= yellow_thresh → RED  (extreme volatility)
         """
         # 1. Calculate Disagreement (Distance between models)
         disagreement = np.abs(lgbm_mu - hnn_mu)
@@ -20,24 +28,21 @@ class UncertaintyGater:
         upper_bound = round(float(np.exp(lgbm_mu + 1.96 * hnn_sigma)), 2)
 
         # 3. Determine Status and Graduated Advice
-        #    - Divergence (epistemic): do the models agree on this input?
-        #    - Sigma (aleatoric): how volatile is pricing in this market segment?
         if disagreement > self.div_thresh:
-            # Safety valve: models fundamentally disagree on this input
             status = "RED"
             advice = (
                 "The models disagree significantly on this gig. "
                 "The predicted price may not be reliable. "
                 "Manual review of competitor prices is recommended before listing."
             )
-        elif hnn_sigma < self.conf_thresh and disagreement < self.div_thresh:
+        elif hnn_sigma < self.green_thresh:
             status = "GREEN"
             advice = (
                 "Stable market — prices in this segment are consistent and "
                 "both models agree. You can use the predicted price as a "
-                "strong starting point. The price range is narrow."
+                "strong starting point."
             )
-        elif hnn_sigma < (self.conf_thresh * 2):
+        elif hnn_sigma < self.yellow_thresh:
             status = "YELLOW"
             advice = (
                 "This market segment has volatile pricing — gigs like yours "
@@ -81,14 +86,21 @@ class UncertaintyGater:
         price_aggr = np.exp(lgbm_mu + 0.5 * hnn_sigma)
         
         # 3. Gating based on Sigma
-        if hnn_sigma < self.conf_thresh:
+        if hnn_sigma < self.green_thresh:
             status = "GREEN"
             rec_tier = "Balanced"
             advice = "Standard market conditions. Balanced pricing is optimal."
-        else:
+        elif hnn_sigma < self.yellow_thresh:
             status = "YELLOW"
             rec_tier = "Conservative"
             advice = "Higher market variance detected. Starting conservative is recommended for new sellers."
+        else:
+            return {
+                "status": "RED",
+                "tier": "Manual Review Required",
+                "advice": "Extreme market volatility. Review competitor prices manually.",
+                "range": (None, None)
+            }
 
         return {
             "status": status,

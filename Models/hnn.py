@@ -8,12 +8,16 @@ from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percent
 from Dataset.preprocessing import fiverr_dss_pipeline, X_train, X_test, y_train, y_test
 import joblib
 
+BETA = 0.5
+
 # Define aleatoric_loss at module level so it can be imported and used when loading saved models
 @tf.keras.saving.register_keras_serializable()
 def aleatoric_loss(y_true, y_pred):
     mu = y_pred[:, :1]
     log_var = y_pred[:, 1:]
-    return K.mean(0.5 * K.exp(-log_var) * K.square(y_true - mu) + 0.5 * log_var)
+    nll = 0.5 * K.exp(-log_var) * K.square(y_true - mu) + 0.5 * log_var
+    weight = tf.stop_gradient(K.exp(log_var)) ** BETA
+    return K.mean(weight * nll)
 
 def build_hnn_model(input_dim, learning_rate=0.001, random_state=None):
     if random_state is not None:

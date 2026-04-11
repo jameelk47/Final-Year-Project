@@ -33,19 +33,18 @@ print("Transformed test shape:", X_test_proc.shape)
 
 # 2. Create and train LightGBM model
 lgbm = LGBMRegressor(
-    n_estimators=200,
-    learning_rate=0.05,
-    max_depth=7,
-    num_leaves=31,
-    min_child_samples=20,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=0.1,
-    random_state=42,
-    verbose=-1,  # Suppress LightGBM output
-    n_jobs=-1,   # Use all CPU cores
-    early_stopping_rounds=20,
+    n_estimators=453,
+    learning_rate=0.011639982228003031,
+    max_depth=12,
+    num_leaves=94,
+    min_child_samples=5,
+    subsample=0.7526087090577469,
+    colsample_bytree=0.5577305488227938,
+    reg_alpha=0.0010019288026431733,
+    reg_lambda=4.884203538265408,
+    min_split_gain=0.259428302991762,
+    random_state=42
+
 )
 
 lgbm.fit(
@@ -72,18 +71,17 @@ print(f"MAPE  : {mape:.4f}")
 print("\n=== 5-Fold Cross-Validation (R^2) ===")
 
 cv_lgbm = LGBMRegressor(
-    n_estimators=200,
-    learning_rate=0.05,
-    max_depth=7,
-    num_leaves=31,
-    min_child_samples=20,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=0.1,
+    n_estimators=453,
+    learning_rate=0.011639982228003031,
+    max_depth=12,
+    num_leaves=94,
+    min_child_samples=5,
+    subsample=0.7526087090577469,
+    colsample_bytree=0.5577305488227938,
+    reg_alpha=0.0010019288026431733,
+    reg_lambda=4.884203538265408,
+    min_split_gain=0.259428302991762,
     random_state=42,
-    verbose=-1,
-    n_jobs=-1,
 )
 
 full_pipeline = Pipeline(

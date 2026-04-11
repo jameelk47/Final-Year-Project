@@ -33,7 +33,7 @@ def load_models():
     hnn.model_ = tf.keras.models.load_model(
         os.path.join(ROOT_DIR, "hnn_weights.keras")
     )
-    gater = UncertaintyGater(confidence_threshold=0.75, divergence_threshold=0.50)
+    gater = UncertaintyGater(green_threshold=0.7538, yellow_threshold=0.9558, divergence_threshold=0.4609)
     return preprocessor, lgbm, hnn, gater
 
 

@@ -6,7 +6,7 @@ from Models.gating import UncertaintyGater
 from Models.hnn import HeteroscedasticKerasRegressor, aleatoric_loss
 
 
-my_gater = UncertaintyGater(confidence_threshold=0.888, divergence_threshold=0.453)
+my_gater = UncertaintyGater(green_threshold=0.7538, yellow_threshold=0.9558, divergence_threshold=0.4609)
 
 class FiverrPricePredictor:
     def __init__(self, preprocessor, lgbm_model, hnn_model, gater):
