@@ -1,0 +1,23 @@
+{
+  "learning_rate": 0.00015811378143283926,
+  "batch_size": 32,
+  "beta": 0.511854466313892,
+  "n_layers": 3,
+  "units_0": 256,
+  "dropout_0": 0.217629,
+  "batchnorm_0": false,
+  "units_1": 128,
+  "dropout_1": 0.186225,
+  "batchnorm_1": false,
+  "units_2": 128,
+  "dropout_2": 0.091927,
+  "batchnorm_2": false,
+  "objective": "composite (NLL + 0.32 * MAE_log)",
+  "best_objective_value": 1.583905,
+  "best_val_nll_gaussian": 1.342939,
+  "best_val_r2_dollar": 0.072586,
+  "best_val_mae_dollar": 47.08,
+  "use_composite_objective": true,
+  "composite_mae_log_weight": 0.32,
+  "narrow_search_space": true
+}

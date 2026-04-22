@@ -1,11 +1,12 @@
+import json
 import numpy as np
 import joblib
+from pathlib import Path
 from xgboost import XGBRegressor
-from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error, mean_squared_error, make_scorer
+from sklearn.model_selection import KFold, cross_validate
 from sklearn.pipeline import Pipeline
 
-# Import fitted preprocessing pipeline, full data, train/test splits, and column definitions
 from Dataset.preprocessing import (
     fiverr_dss_pipeline,
     X,
@@ -20,93 +21,79 @@ from Dataset.preprocessing import (
     num_cols,
 )
 
-# 1. Transform features using the fitted preprocessing pipeline
-X_train_proc = fiverr_dss_pipeline.transform(X_train)
-X_test_proc = fiverr_dss_pipeline.transform(X_test)
-
-# XGBoost can handle sparse matrices natively, but we'll convert to dense for consistency
-X_train_proc = X_train_proc.toarray()
-X_test_proc = X_test_proc.toarray()
+# ──────────────────────────────────────────────
+# 1. Transform features
+# ──────────────────────────────────────────────
+X_train_proc = fiverr_dss_pipeline.transform(X_train).toarray()
+X_test_proc = fiverr_dss_pipeline.transform(X_test).toarray()
 
 print("Transformed train shape:", X_train_proc.shape)
 print("Transformed test shape:", X_test_proc.shape)
 
-# 2. Create and train XGBoost model
-xgb = XGBRegressor(
-    n_estimators=200,
-    learning_rate=0.05,
-    max_depth=7,
-    min_child_weight=5,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=1.0,
-    random_state=42,
-    verbosity=0,
-    n_jobs=-1,
-    early_stopping_rounds=20,
-)
+def dollar_r2(y_true, y_pred):
+    return r2_score(np.expm1(y_true), np.expm1(y_pred))
 
-xgb.fit(
-    X_train_proc,
-    y_train,
-    eval_set=[(X_test_proc, y_test)],
-    verbose=False,
-)
+def dollar_mae(y_true, y_pred):
+    return mean_absolute_error(np.expm1(y_true), np.expm1(y_pred))
 
-# 3. Predict on the test set
-y_pred = xgb.predict(X_test_proc)
+def dollar_mape(y_true, y_pred):
+    return mean_absolute_percentage_error(np.expm1(y_true), np.expm1(y_pred))
 
-# 4. Evaluation metrics: R^2, MAE, MAPE
-r2 = r2_score(y_test, y_pred)
-mae = mean_absolute_error(y_test, y_pred)
-mape = mean_absolute_percentage_error(y_test, y_pred)
+def dollar_rmse(y_true, y_pred):
+    return np.sqrt(mean_squared_error(np.expm1(y_true), np.expm1(y_pred)))
 
-print("\n=== XGBoost Performance ===")
-print(f"R^2   : {r2:.4f}")
-print(f"MAE   : {mae:.4f}")
-print(f"MAPE  : {mape:.4f}")
+scoring = {
+    "r2":   make_scorer(dollar_r2),
+    "mae":  make_scorer(dollar_mae, greater_is_better=False),
+    "mape": make_scorer(dollar_mape, greater_is_better=False),
+    "rmse": make_scorer(dollar_rmse, greater_is_better=False),
+}
 
-# 5. K-fold cross-validation on full pipeline (preprocessing + XGBoost)
-print("\n=== 5-Fold Cross-Validation (R^2) ===")
+# ──────────────────────────────────────────────
+# 2. Load Optuna-tuned params & build model
+# ──────────────────────────────────────────────
+params_path = Path(__file__).resolve().parent.parent / "xgb_best_params.json"
+with open(params_path) as f:
+    best_params = json.load(f)
 
-cv_xgb = XGBRegressor(
-    n_estimators=200,
-    learning_rate=0.05,
-    max_depth=7,
-    min_child_weight=5,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=1.0,
-    random_state=42,
-    verbosity=0,
-    n_jobs=-1,
-)
+best_params.update({"random_state": 42, "verbosity": 0, "n_jobs": -1})
+xgb = XGBRegressor(**best_params)
 
+# ──────────────────────────────────────────────
+# 3. K-Fold Cross-Validation (dollar-space)
+# ──────────────────────────────────────────────
 full_pipeline = Pipeline(
     steps=[
         ("preprocess", fiverr_dss_pipeline),
-        ("model", cv_xgb),
+        ("model", xgb),
     ]
 )
 
 kf = KFold(n_splits=5, shuffle=True, random_state=42)
-cv_scores = cross_val_score(full_pipeline, X, y, cv=kf, scoring="r2")
+cv = cross_validate(full_pipeline, X, y, cv=kf, scoring=scoring)
 
-print("Fold R^2 scores:", np.round(cv_scores, 4))
-print("Mean R^2:", cv_scores.mean().round(4))
+r2_scores  = cv["test_r2"]
+mae_scores = -cv["test_mae"]
+mape_scores = -cv["test_mape"]
+rmse_scores = -cv["test_rmse"]
 
-# 6. Feature importance (top 10) with feature names from the pipeline
-feature_importance = xgb.feature_importances_
+print("\n=== 5-Fold Cross-Validation (dollar-space) ===")
+print(f"R²   : {np.round(r2_scores, 4)}  → Mean: {r2_scores.mean():.4f} ± {r2_scores.std():.4f}")
+print(f"MAE  : {np.round(mae_scores, 2)}  → Mean: ${mae_scores.mean():.2f} ± {mae_scores.std():.2f}")
+print(f"MAPE : {np.round(mape_scores, 4)}  → Mean: {mape_scores.mean():.4f} ± {mape_scores.std():.4f}")
+print(f"RMSE : {np.round(rmse_scores, 2)}  → Mean: ${rmse_scores.mean():.2f} ± {rmse_scores.std():.2f}")
 
-# Recover feature names from the fitted ColumnTransformer
+# ──────────────────────────────────────────────
+# 4. Train on full data for feature importance
+# ──────────────────────────────────────────────
+xgb.fit(X_train_proc, y_train)
+
+# ──────────────────────────────────────────────
+# 5. Feature Importance (top 10)
+# ──────────────────────────────────────────────
 enc = fiverr_dss_pipeline.named_steps["encoding"]
-
 tfidf = enc.named_transformers_["tfidf"]
 ohe = enc.named_transformers_["ohe"]
-target_enc = enc.named_transformers_["target_enc"]  # noqa: F841
-# Note: numeric columns go through 'num_pipeline' transformer, but we use num_cols for names
 
 tfidf_features = tfidf.get_feature_names_out()
 ohe_features = ohe.get_feature_names_out(cat_col)
@@ -117,13 +104,9 @@ feature_names = np.concatenate(
     [tfidf_features, ohe_features, target_features, num_features]
 )
 
+feature_importance = xgb.feature_importances_
 top_indices = np.argsort(feature_importance)[-10:][::-1]
 print("\n=== Top 10 Most Important Features ===")
 for idx in top_indices:
-    if idx < len(feature_names):
-        name = feature_names[idx]
-    else:
-        name = f"feature_{idx}"
-    print(f"{name}: {feature_importance[idx]:.4f}")
-
-
+    name = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
+    print(f"  {name}: {feature_importance[idx]:.4f}")

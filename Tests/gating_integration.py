@@ -15,7 +15,7 @@ def predictor():
     hnn = joblib.load('hnn_wrapper.pkl')
     hnn.model_ = tf.keras.models.load_model('hnn_weights.keras', compile=False)
 
-    gater = UncertaintyGater(green_threshold=0.7538, yellow_threshold=0.9558, divergence_threshold=0.4609)
+    gater = UncertaintyGater()
     return FiverrPricePredictor(preprocessor, lgbm, hnn, gater)
 
 
@@ -29,7 +29,7 @@ def test_integration_low_variance(predictor):
         stars=4.9,
         votes=150
     )
-    assert result['status'] in ["GREEN"]
+    assert result['status'] in ["GREEN_PLUS", "GREEN"]
     assert 'price' in result
     assert 'range' in result
     assert 'advice' in result
@@ -85,7 +85,7 @@ def test_integration_golden_path(predictor):
         votes=sample_row['votes']
     )
 
-    assert result['status'] in ["GREEN", "YELLOW", "RED"]
+    assert result['status'] in ["GREEN_PLUS", "GREEN", "YELLOW", "RED"]
     assert result['price'] > 0
     lower, upper = result['range']
     assert lower < result['price'] < upper

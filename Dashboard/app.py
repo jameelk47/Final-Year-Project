@@ -31,9 +31,10 @@ def load_models():
     lgbm = joblib.load(os.path.join(ROOT_DIR, "lgbm_model.pkl"))
     hnn = joblib.load(os.path.join(ROOT_DIR, "hnn_wrapper.pkl"))
     hnn.model_ = tf.keras.models.load_model(
-        os.path.join(ROOT_DIR, "hnn_weights.keras")
+        os.path.join(ROOT_DIR, "hnn_weights.keras"),
+        compile=False,
     )
-    gater = UncertaintyGater(green_threshold=0.7538, yellow_threshold=0.9558, divergence_threshold=0.4609)
+    gater = UncertaintyGater()
     return preprocessor, lgbm, hnn, gater
 
 
@@ -180,12 +181,21 @@ if predict_btn and title and sub_category:
     st.subheader("📊 Confidence & Advice")
 
     status = result["status"]
-    if status == "GREEN":
+    if status == "GREEN_PLUS":
+        st.success(
+            f"🟢 **{status}** — Very High Confidence, Anchor on Predicted Price"
+        )
+    elif status == "GREEN":
         st.success(f"🟢 **{status}** — Stable Market, Models Agree")
     elif status == "YELLOW":
         st.warning(f"🟡 **{status}** — Volatile Market, Models Agree")
+    elif status == "RED":
+        if "disagree" in result["advice"].lower():
+            st.error(f"🔴 **{status}** — Models Disagree")
+        else:
+            st.error(f"🔴 **{status}** — Extreme Market Volatility")
     else:
-        st.error(f"🔴 **{status}** — Models Disagree")
+        st.error(f"🔴 **{status}**")
 
     st.markdown(f"**💡 Advice:** {result['advice']}")
 

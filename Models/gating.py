@@ -1,11 +1,22 @@
 import numpy as np
 
 class UncertaintyGater:
-    def __init__(self, green_threshold=0.7538, yellow_threshold=0.9558,
-                 divergence_threshold=0.4609):
-        self.green_thresh = green_threshold      # sigma below this → GREEN  (P30)
-        self.yellow_thresh = yellow_threshold    # sigma below this (but above green) → YELLOW (P70)
-        self.div_thresh = divergence_threshold   # model disagreement threshold (P70)
+    def __init__(
+        self,
+        green_plus_threshold=0.7670,
+        green_threshold=0.8993,
+        yellow_threshold=1.0571,
+        divergence_threshold=0.3211,
+    ):
+        # Calibrated on held-out test predictions (see Tests/calibration_threshold.py).
+        # Sigma tiers: percentiles of HNN total σ (MC-dropout) — P10 / P30 / P70.
+        # Divergence: P70 of |LGBM μ − HNN μ| (preferable to risk-curve elbow here:
+        # divergence vs MAE is noisy; P70 flags the worst ~30% disagreements without
+        # over-triggering RED relative to the elbow heuristic).
+        self.green_plus_thresh = green_plus_threshold
+        self.green_thresh = green_threshold
+        self.yellow_thresh = yellow_threshold
+        self.div_thresh = divergence_threshold
 
     def get_recommendation(self, lgbm_mu, hnn_mu, hnn_sigma):
         """
@@ -15,25 +26,31 @@ class UncertaintyGater:
 
         Logic:
           1. disagreement > div_thresh           → RED  (models disagree)
-          2. Models agree AND sigma < green_thresh  → GREEN
-          3. Models agree AND sigma < yellow_thresh → YELLOW
-          4. Models agree AND sigma >= yellow_thresh → RED  (extreme volatility)
+          2. Models agree AND sigma < green_plus → GREEN_PLUS (very high confidence)
+          3. Models agree AND sigma < green      → GREEN
+          4. Models agree AND sigma < yellow     → YELLOW
+          5. Models agree AND sigma >= yellow    → RED  (extreme volatility)
         """
-        # 1. Calculate Disagreement (Distance between models)
         disagreement = np.abs(lgbm_mu - hnn_mu)
 
-        # 2. Calculate Price Range (using LGBM as anchor, HNN sigma for bounds)
         price = round(float(np.exp(lgbm_mu)), 2)
         lower_bound = round(float(np.exp(lgbm_mu - 1.96 * hnn_sigma)), 2)
         upper_bound = round(float(np.exp(lgbm_mu + 1.96 * hnn_sigma)), 2)
 
-        # 3. Determine Status and Graduated Advice
         if disagreement > self.div_thresh:
             status = "RED"
             advice = (
                 "The models disagree significantly on this gig. "
                 "The predicted price may not be reliable. "
                 "Manual review of competitor prices is recommended before listing."
+            )
+        elif hnn_sigma < self.green_plus_thresh:
+            status = "GREEN_PLUS"
+            advice = (
+                "Very high confidence — this segment shows unusually stable pricing "
+                "and both models agree closely. Use the predicted price as your main "
+                "anchor. If your portfolio, delivery, or niche clearly justify a "
+                "premium, you may also consider pricing toward the upper bound of the range."
             )
         elif hnn_sigma < self.green_thresh:
             status = "GREEN"
@@ -71,8 +88,7 @@ class UncertaintyGater:
     def get_advanced_recommendation(self, lgbm_mu, hnn_mu, hnn_sigma):
         price_mid = np.exp(lgbm_mu)
         disagreement = np.abs(lgbm_mu - hnn_mu)
-        
-        # 1. First, check for System Conflict (The 'Safety Valve')
+
         if disagreement > self.div_thresh:
             return {
                 "status": "RED",
@@ -81,12 +97,17 @@ class UncertaintyGater:
                 "range": (None, None)
             }
 
-        # 2. If models agree, proceed to Tiering
         price_consv = np.exp(lgbm_mu - 0.5 * hnn_sigma)
         price_aggr = np.exp(lgbm_mu + 0.5 * hnn_sigma)
-        
-        # 3. Gating based on Sigma
-        if hnn_sigma < self.green_thresh:
+
+        if hnn_sigma < self.green_plus_thresh:
+            status = "GREEN_PLUS"
+            rec_tier = "Balanced (premium allowed)"
+            advice = (
+                "Very stable conditions. Balanced pricing is optimal; a justified "
+                "premium may move you toward the aggressive tier."
+            )
+        elif hnn_sigma < self.green_thresh:
             status = "GREEN"
             rec_tier = "Balanced"
             advice = "Standard market conditions. Balanced pricing is optimal."
@@ -112,4 +133,3 @@ class UncertaintyGater:
             },
             "advice": advice
         }
-

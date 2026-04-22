@@ -88,17 +88,21 @@ def run_calibration():
     elbow_div = div_thresholds[div_elbow_idx]
 
     # 9. Percentile-based threshold candidates
+    GREEN_PLUS_PCTL = 10
     GREEN_PCTL, YELLOW_PCTL, DIV_PCTL = 30, 70, 70
 
+    green_plus_sigma = np.percentile(hnn_sigma, GREEN_PLUS_PCTL)
     green_sigma = np.percentile(hnn_sigma, GREEN_PCTL)
     yellow_sigma = np.percentile(hnn_sigma, YELLOW_PCTL)
     div_pctl_val = np.percentile(disagreement, DIV_PCTL)
 
     # MAE for predictions within each proposed tier
-    green_mask = hnn_sigma <= green_sigma
+    green_plus_mask = hnn_sigma <= green_plus_sigma
+    green_mask = (hnn_sigma > green_plus_sigma) & (hnn_sigma <= green_sigma)
     yellow_mask = (hnn_sigma > green_sigma) & (hnn_sigma <= yellow_sigma)
     red_vol_mask = hnn_sigma > yellow_sigma
 
+    green_plus_mae = errors[green_plus_mask].mean() if green_plus_mask.sum() > 0 else float('nan')
     green_mae = errors[green_mask].mean() if green_mask.sum() > 0 else float('nan')
     yellow_mae = errors[yellow_mask].mean() if yellow_mask.sum() > 0 else float('nan')
     red_vol_mae = errors[red_vol_mask].mean() if red_vol_mask.sum() > 0 else float('nan')
@@ -114,6 +118,7 @@ def run_calibration():
     print("\n" + "=" * 60)
     print("  PERCENTILE-BASED THRESHOLDS")
     print("=" * 60)
+    print(f"  green_plus_threshold (sigma P{GREEN_PLUS_PCTL}):  {green_plus_sigma:.4f}")
     print(f"  green_threshold  (sigma  P{GREEN_PCTL}):   {green_sigma:.4f}")
     print(f"  yellow_threshold (sigma  P{YELLOW_PCTL}):   {yellow_sigma:.4f}")
     print(f"  divergence_threshold (P{DIV_PCTL}):   {div_pctl_val:.4f}")
@@ -121,7 +126,8 @@ def run_calibration():
     print("\n" + "-" * 60)
     print("  CROSS-VALIDATION: MAE per tier")
     print("-" * 60)
-    print(f"  GREEN  (sigma <= {green_sigma:.4f}):  MAE = {green_mae:.4f}  ({green_mask.sum()} gigs)")
+    print(f"  GREEN+ (sigma <= {green_plus_sigma:.4f}):  MAE = {green_plus_mae:.4f}  ({green_plus_mask.sum()} gigs)")
+    print(f"  GREEN  ({green_plus_sigma:.4f} < sigma <= {green_sigma:.4f}):  MAE = {green_mae:.4f}  ({green_mask.sum()} gigs)")
     print(f"  YELLOW ({green_sigma:.4f} < sigma <= {yellow_sigma:.4f}):  MAE = {yellow_mae:.4f}  ({yellow_mask.sum()} gigs)")
     print(f"  RED    (sigma > {yellow_sigma:.4f}):  MAE = {red_vol_mae:.4f}  ({red_vol_mask.sum()} gigs)")
     print(f"  Overall MAE:                    {overall_mae:.4f}")
@@ -130,6 +136,11 @@ def run_calibration():
     print("\n" + "-" * 60)
     print("  VALIDATION")
     print("-" * 60)
+    if green_plus_sigma <= elbow_sigma:
+        print(f"  ✓ green_plus_threshold ({green_plus_sigma:.4f}) is at or below sigma elbow ({elbow_sigma:.4f}) — safe")
+    else:
+        print(f"  ✗ green_plus_threshold ({green_plus_sigma:.4f}) is ABOVE sigma elbow ({elbow_sigma:.4f}) — consider lowering")
+
     if green_sigma <= elbow_sigma:
         print(f"  ✓ green_threshold ({green_sigma:.4f}) is at or below sigma elbow ({elbow_sigma:.4f}) — safe")
     else:
@@ -145,7 +156,10 @@ def run_calibration():
     if div_pctl_val <= elbow_div:
         print(f"  ✓ divergence_threshold ({div_pctl_val:.4f}) is at or below elbow ({elbow_div:.4f}) — safe")
     else:
-        print(f"  ⚠ divergence_threshold ({div_pctl_val:.4f}) is above elbow ({elbow_div:.4f}) — check tier MAE")
+        print(
+            f"  ℹ divergence_threshold ({div_pctl_val:.4f}) is above elbow ({elbow_div:.4f}) — "
+            "expected: we use P70 for production (fewer false REDs); elbow is reference only."
+        )
     print("=" * 60)
 
     return lgbm, hnn, X_test_proc
@@ -183,7 +197,7 @@ def run_uncertainty_eda(lgbm_model, hnn_model, X_test_proc):
 
     # 5. Print Percentile Table for your Thesis
     print("--- Percentile Breakdown ---")
-    print(df_eda.describe(percentiles=[.25, .30, .50, .70, .75, .85, .90, .95, .99]))
+    print(df_eda.describe(percentiles=[.10, .15, .25, .30, .50, .70, .75, .85, .90, .95, .99]))
 
 # Run this using your loaded models and processed test set
 

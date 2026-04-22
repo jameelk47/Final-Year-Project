@@ -163,21 +163,24 @@ hnn.fit(X_train_proc, y_train)
 # 3. Predict on the test set (with uncertainty)
 y_pred_mean, y_pred_std = hnn.predict(X_test_proc, return_std=True)
 
-# 4. Evaluation metrics: R^2, MAE, MAPE
-r2 = r2_score(y_test, y_pred_mean)
-mae = mean_absolute_error(y_test, y_pred_mean)
-mape = mean_absolute_percentage_error(y_test, y_pred_mean)
+# 4. Evaluation metrics in dollar-space (expm1 to invert log1p)
+y_test_dollars = np.expm1(y_test)
+y_pred_dollars = np.expm1(y_pred_mean)
 
-print("\n=== Heteroscedastic NN Performance ===")
+r2 = r2_score(y_test_dollars, y_pred_dollars)
+mae = mean_absolute_error(y_test_dollars, y_pred_dollars)
+mape = mean_absolute_percentage_error(y_test_dollars, y_pred_dollars)
+
+print("\n=== Faithful Heteroscedastic NN Performance (dollar-space) ===")
 print(f"R^2   : {r2:.4f}")
-print(f"MAE   : {mae:.4f}")
+print(f"MAE   : ${mae:.2f}")
 print(f"MAPE  : {mape:.4f}")
 
 # 5. Optional: inspect a few predictions with uncertainty
 for i in range(5):
     print(
-        f"True: {y_test.iloc[i]:.3f}, "
-        f"Pred: {y_pred_mean[i]:.3f}, "
+        f"True: ${np.expm1(y_test.iloc[i]):.2f}, "
+        f"Pred: ${np.expm1(y_pred_mean[i]):.2f}, "
         f"Std (uncertainty): {y_pred_std[i]:.3f}"
     )
 
