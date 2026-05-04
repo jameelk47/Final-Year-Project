@@ -57,7 +57,7 @@ class SHAPAdvisor:
         """
         Parameters
         ----------
-        lgbm_model : fitted LGBMRegressor
+        lgbm_model : fitted LGBMRegressor (or XGBoostRegressor/RandomForestRegressor )
         hnn_model  : fitted HeteroscedasticKerasRegressor (with .predict(X, return_std=True))
         X_background : np.ndarray
             A small sample of processed training data (e.g. 100 rows).

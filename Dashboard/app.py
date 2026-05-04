@@ -24,32 +24,32 @@ st.set_page_config(
 )
 
 
-# ── Load Models + SHAP Advisor (cached, loaded once) ──
+# ── Load Models (cached, loaded once) ──
 @st.cache_resource
 def load_models():
     preprocessor = joblib.load(os.path.join(ROOT_DIR, "preprocessor.pkl"))
     lgbm = joblib.load(os.path.join(ROOT_DIR, "lgbm_model.pkl"))
-    hnn = joblib.load(os.path.join(ROOT_DIR, "hnn_wrapper.pkl"))
+    xgb  = joblib.load(os.path.join(ROOT_DIR, "xgb_model.pkl"))
+    rf   = joblib.load(os.path.join(ROOT_DIR, "rf_model.pkl"))
+    hnn  = joblib.load(os.path.join(ROOT_DIR, "hnn_wrapper.pkl"))
     hnn.model_ = tf.keras.models.load_model(
         os.path.join(ROOT_DIR, "hnn_weights.keras"),
         compile=False,
     )
     gater = UncertaintyGater()
-    return preprocessor, lgbm, hnn, gater
+    return preprocessor, lgbm, xgb, rf, hnn, gater
 
 
 @st.cache_resource
-def load_shap_advisor(_preprocessor, _lgbm, _hnn):
-    """Build SHAPAdvisor with feature names and background data."""
-    # Extract feature names from the fitted preprocessor
+def build_shap_background(_preprocessor):
+    """Compute feature names and background data once (shared across all advisors)."""
     enc = _preprocessor.named_steps["encoding"]
     tfidf_features = enc.named_transformers_["tfidf"].get_feature_names_out()
-    ohe_features = enc.named_transformers_["ohe"].get_feature_names_out(["Category"])
+    ohe_features   = enc.named_transformers_["ohe"].get_feature_names_out(["Category"])
     target_features = np.array(["Subcat_te"])
-    num_features = np.array(["votes", "stars", "votes_capped", "name_length", "cold_start"])
-    feature_names = np.concatenate([tfidf_features, ohe_features, target_features, num_features])
+    num_features    = np.array(["votes", "stars", "votes_capped", "name_length", "cold_start"])
+    feature_names   = np.concatenate([tfidf_features, ohe_features, target_features, num_features])
 
-    # Build background sample from the raw CSV
     path = kagglehub.dataset_download("kirilspiridonov/freelancers-offers-on-fiverr")
     csv_file = os.path.join(path, "fiverr_clean.csv")
     df = pd.read_csv(csv_file, encoding="latin-1")
@@ -57,8 +57,17 @@ def load_shap_advisor(_preprocessor, _lgbm, _hnn):
     sample = df.sample(100, random_state=42).drop(columns=["price", "Unnamed: 0"])
     X_background = _preprocessor.transform(sample).toarray()
 
-    advisor = SHAPAdvisor(_lgbm, _hnn, X_background, feature_names)
-    return advisor
+    return X_background, feature_names
+
+
+@st.cache_resource
+def get_shap_advisor(model_key, _point_model, _hnn, _X_background, _feature_names):
+    """
+    Lazily build and cache a SHAPAdvisor for the chosen point model.
+    model_key (str) is the only hashed argument — one cache entry per tree model.
+    Background data and feature names are shared; they are not re-hashed.
+    """
+    return SHAPAdvisor(_point_model, _hnn, _X_background, _feature_names)
 
 
 @st.cache_data
@@ -76,10 +85,16 @@ def load_category_subcat_mapping():
     return mapping
 
 
-preprocessor, lgbm, hnn, gater = load_models()
-shap_advisor = load_shap_advisor(preprocessor, lgbm, hnn)
+preprocessor, lgbm, xgb, rf, hnn, gater = load_models()
+X_background, feature_names = build_shap_background(preprocessor)
 cat_subcat_map = load_category_subcat_mapping()
 categories = sorted(cat_subcat_map.keys())
+
+POINT_MODELS = {
+    "LightGBM":    lgbm,
+    "XGBoost":     xgb,
+    "Random Forest": rf,
+}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -123,6 +138,16 @@ with col_votes:
         "Reviews", min_value=0, max_value=10000, value=50, step=10
     )
 
+with st.expander("⚙️ Advanced Settings"):
+    point_model_name = st.selectbox(
+        "Point Estimate Model",
+        options=list(POINT_MODELS.keys()),
+        help=(
+            "Choose which tree model to use for the price point estimate. "
+            "SHAP explanations will reflect the selected model."
+        ),
+    )
+
 predict_btn = st.button(
     "🔍 Get Price Recommendation", type="primary", use_container_width=True
 )
@@ -150,14 +175,18 @@ if predict_btn and title and sub_category:
 
         # Preprocess → Model predictions
         X_processed = preprocessor.transform(raw_data).toarray()
-        lgbm_mu = lgbm.predict(X_processed)[0]
+        point_model  = POINT_MODELS[point_model_name]
+        point_mu     = point_model.predict(X_processed)[0]
         hnn_mu, hnn_sigma = hnn.predict(X_processed, return_std=True)
 
-        # Gating recommendation
-        result = gater.get_recommendation(lgbm_mu, hnn_mu[0], hnn_sigma[0])
+        # Gating recommendation (first arg is log-price from chosen tree model)
+        result = gater.get_recommendation(point_mu, hnn_mu[0], hnn_sigma[0])
 
-        # SHAP explanations
-        price_exp = shap_advisor.explain_price(X_processed)
+        # SHAP explanations (advisor built lazily for the selected point model)
+        shap_advisor = get_shap_advisor(
+            point_model_name, point_model, hnn, X_background, feature_names
+        )
+        price_exp       = shap_advisor.explain_price(X_processed)
         uncertainty_exp = shap_advisor.explain_uncertainty(X_processed)
 
     # ════════════════════════════════════════════════════════════
@@ -252,11 +281,11 @@ if predict_btn and title and sub_category:
             st.write(f"**HNN Sigma (market volatility):** {result['sigma']}")
             st.write(f"**Model Divergence:** {result['divergence']}")
         with detail_col2:
-            st.write(f"**LGBM prediction (log-price):** {lgbm_mu:.4f}")
+            st.write(f"**{point_model_name} prediction (log-price):** {point_mu:.4f}")
             st.write(f"**HNN prediction (log-price):** {hnn_mu[0]:.4f}")
         st.caption(
             "Sigma measures aleatoric uncertainty (inherent market price variance). "
-            "Divergence measures how much the LGBM and HNN models disagree on this input."
+            f"Divergence measures how much {point_model_name} and HNN disagree on this input."
         )
 
 elif predict_btn and not sub_category:
@@ -268,6 +297,6 @@ elif predict_btn and not title:
 # ── Footer ──
 st.divider()
 st.caption(
-    "Built with LightGBM + Heteroscedastic Neural Network | "
+    "Built with LightGBM · XGBoost · Random Forest + Heteroscedastic Neural Network | "
     "Uncertainty-aware gating | SHAP explainability | Fiverr freelancer dataset"
 )

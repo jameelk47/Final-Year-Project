@@ -1,4 +1,5 @@
 import json
+import joblib
 import numpy as np
 from pathlib import Path
 from sklearn.ensemble import RandomForestRegressor
@@ -113,3 +114,8 @@ print("\n=== Top 10 Most Important Features ===")
 for idx in top_indices:
     name = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
     print(f"  {name}: {feature_importance[idx]:.4f}")
+
+# ──────────────────────────────────────────────
+# 6. Save artefacts (same pattern as ensemble.py: cwd-relative .pkl)
+# ──────────────────────────────────────────────
+joblib.dump(rf, "rf_model.pkl")

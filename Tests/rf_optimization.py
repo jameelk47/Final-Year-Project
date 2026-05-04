@@ -109,16 +109,14 @@ def rf_objective(trial):
 # ──────────────────────────────────────────────
 # 5. Run optimisation
 # ──────────────────────────────────────────────
-N_TRIALS = 100
 
 rf_study = optuna.create_study(
     direction="maximize",
     sampler=optuna.samplers.TPESampler(seed=42),
-    pruner=optuna.pruners.MedianPruner(),
     study_name="random_forest",
 )
 
-rf_study.optimize(rf_objective, n_trials=N_TRIALS, show_progress_bar=True)
+rf_study.optimize(rf_objective, n_trials=200, show_progress_bar=True)
 
 print("\n=== Random Forest Optuna Results ===")
 print(f"Best CV R² (dollar-space): {rf_study.best_value:.4f}")
